@@ -9,7 +9,7 @@ admin.initializeApp({
     credential: admin.credential.cert({
         projectId: process.env.PROJECT_ID,
         clientEmail: process.env.CLIENT_EMAIL,
-        privateKey: process.env.PRIVATE_KEY.replace(/\\n/g, '\n')
+        privateKey: Buffer.from(process.env.PRIVATE_KEY, 'base64').toString('utf-8').replace(/\\n/g, '\n')
     }),
     databaseURL: process.env.DATABASE_URL
 });

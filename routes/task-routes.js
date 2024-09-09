@@ -15,6 +15,9 @@ router.post('/addTask',
         if (!errors.isEmpty()) {
             return res.status(400).json({ errors: errors.array() });
         }
+        const token = req.headers.authorization.split(' ')[1];
+        const decodedToken = await admin.auth().verifyIdToken(token);
+        const uid = decodedToken.uid;
 
 
 
@@ -27,12 +30,14 @@ router.post('/addTask',
                 createdAt: Timestamp.now(),
                 updatedAt: Timestamp.now(),
                 order: 0,
+                userId: uid,
             };
 
             const docRef = await admin.firestore().collection('taskList').add({
                 tasks: [],
                 createdAt: Timestamp.now(),
                 updatedAt: Timestamp.now(),
+                userId: uid,
             });
 
             const doc = await admin.firestore().collection(`taskList/${docRef.id}/tasks`).add(task);
