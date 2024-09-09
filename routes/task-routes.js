@@ -23,9 +23,30 @@ router.post('/addTask',
         const { title = '', description = '' } = req.body;
 
         try {
-            const batch = admin.firestore().batch();
+            const taskListSnapshot = await admin.firestore().collection('taskList')
+                .where('userId', '==', uid)
+                .where('title', '==', 'TODO')
+                .limit(1)
+                .get();
 
-            const taskListRef = admin.firestore().collection('taskList').doc();
+            let taskListRef;
+            if (taskListSnapshot.empty) {
+                // If no "TODO" list is found, create a new one
+                taskListRef = admin.firestore().collection('taskList').doc();
+                await taskListRef.set({
+                    title: 'TODO',
+                    tasks: [],
+                    createdAt: Timestamp.now(),
+                    updatedAt: Timestamp.now(),
+                    userId: uid,
+                });
+            } else {
+                taskListRef = taskListSnapshot.docs[0].ref;
+            }
+            const existingTasksSnapshot = await taskListRef.collection('tasks').get();
+            const order = existingTasksSnapshot.size;
+
+            const batch = admin.firestore().batch();
             const taskRef = taskListRef.collection('tasks').doc();
 
             const task = {
@@ -33,22 +54,18 @@ router.post('/addTask',
                 description,
                 createdAt: Timestamp.now(),
                 updatedAt: Timestamp.now(),
-                order: 0,
+                order: order,
                 userId: uid,
                 id: taskRef.id,
             };
 
-            batch.set(taskListRef, {
-                tasks: [taskRef.id],
-                createdAt: Timestamp.now(),
+            batch.set(taskRef, task);
+            batch.update(taskListRef, {
+                tasks: admin.firestore.FieldValue.arrayUnion(taskRef.id),
                 updatedAt: Timestamp.now(),
-                userId: uid,
             });
 
-            batch.set(taskRef, task);
-
             await batch.commit();
-
             return res.status(201).json({ message: 'Task added successfully', taskId: taskRef.id });
 
         } catch (error) {
@@ -57,31 +74,61 @@ router.post('/addTask',
         }
     }
 );
+
+
 router.get('/', authenticateToken, async (req, res) => {
     try {
         const token = req.headers.authorization.split(' ')[1];
         const decodedToken = await admin.auth().verifyIdToken(token);
         const uid = decodedToken.uid;
-        const snapshot = await admin.firestore().collection('taskList').get();
-        const tasks = [];
+
+        // Fetch task lists where userId equals the authenticated user's ID
+        const snapshot = await admin.firestore().collection('taskList')
+            .where('userId', '==', uid)
+            .get();
+
+        // Initialize tasks array with placeholders for TODO, IN PROGRESS, and DONE
+        const tasks = [
+            { id: null, title: 'TODO', tasks: [] },
+            { id: null, title: 'IN PROGRESS', tasks: [] },
+            { id: null, title: 'DONE', tasks: [] }
+        ];
 
         for (const doc of snapshot.docs) {
-            const taskListSnapshot = await admin.firestore().collection(`taskList/${doc.id}/tasks`).get();
-            const taskList = taskListSnapshot.docs
-                .filter(taskDoc => taskDoc.data().userId === uid) // Filter tasks by userId
-                .map(taskDoc => ({
-                    ...taskDoc.data(),
-                    listId: doc.id
-                }));
+            const taskListSnapshot = await admin.firestore().collection(`taskList/${doc.id}/tasks`).orderBy(
+                'order', 'asc'
+            ).get();
+            const taskList = taskListSnapshot.docs.map(taskDoc => ({
+                ...taskDoc.data(),
+                listId: doc.id
+            }));
 
-            if (taskList.length > 0) {
-                tasks.push({
-                    id: doc.id,
-                    title: doc.data().title,
-                    tasks: taskList,
-                });
+            switch (doc.data().title.toUpperCase()) {
+                case 'TODO':
+                    tasks[0] = {
+                        id: doc.id,
+                        title: doc.data().title,
+                        tasks: taskList,
+                    };
+                    break;
+                case 'IN PROGRESS':
+                    tasks[1] = {
+                        id: doc.id,
+                        title: doc.data().title,
+                        tasks: taskList,
+                    };
+                    break;
+                case 'DONE':
+                    tasks[2] = {
+                        id: doc.id,
+                        title: doc.data().title,
+                        tasks: taskList,
+                    };
+                    break;
+                default:
+                    console.warn(`Unexpected list title: ${doc.data().title}`);
+                    break;
             }
-
         }
 
         return res.status(200).json(tasks);
@@ -92,84 +139,108 @@ router.get('/', authenticateToken, async (req, res) => {
     }
 });
 
-router.put('/:id', authenticateToken, async (req, res) => {
-    const { id } = req.params;
-    const { title, description, listId } = req.body;
+router.put('/:id',
+    authenticateToken,
+    body('title').optional().trim().escape(),
+    body('description').optional().trim().escape(),
+    body('listId').optional().trim().escape(),
+    async (req, res) => {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({ errors: errors.array() });
+        }
+        const { id } = req.params;
+        const { title, description, listId } = req.body;
 
-    try {
-        await admin.firestore().collection(`taskList/${listId}/tasks`).doc(id).update({
-            title,
-            description,
-            updatedAt: Timestamp.now(),
-        });
+        try {
+            await admin.firestore().collection(`taskList/${listId}/tasks`).doc(id).update({
+                title,
+                description,
+                updatedAt: Timestamp.now(),
+            });
 
-        return res.status(200).json({ message: 'Task updated successfully' });
+            return res.status(200).json({ message: 'Task updated successfully' });
 
-    } catch (error) {
-        console.error('Error updating task:', error);
-        return res.status(500).json({ error: 'Something went wrong' });
-    }
-});
+        } catch (error) {
+            console.error('Error updating task:', error);
+            return res.status(500).json({ error: 'Something went wrong' });
+        }
+    });
 
-router.put('/reorder', authenticateToken, async (req, res) => {
-    const { listId, newList, id, order, title, description } = req.body;
-
-    try {
-        const db = admin.firestore();
-
-        // If task is moving to a new list, delete it from the old list
-        if (newList && listId !== newList) {
-            await db.collection(`taskList/${listId}/tasks`).doc(id).delete();
+router.post('/reorder', authenticateToken,
+    body('listId').optional().trim().escape(),
+    body('newList').optional().trim().escape(),
+    body('id').optional().trim().escape(),
+    body('order').optional().isNumeric()
+    , async (req, res) => {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({ errors: errors.array() });
         }
 
-        // Get tasks in the new list (or current list) that have an order greater than or equal to the new order
-        const tasksToUpdate = await db.collection(`taskList/${newList || listId}/tasks`)
-            .where('order', '>=', order)
-            .orderBy('order', 'asc')
-            .get();
+        const { listId, newList, id, order } = req.body;
 
-        const batch = db.batch();
+        try {
+            const batch = admin.firestore().batch();
 
-        // Increment the order of all tasks that come after the newly placed task
-        tasksToUpdate.forEach((doc) => {
-            const taskRef = db.collection(`taskList/${newList || listId}/tasks`).doc(doc.id);
-            batch.update(taskRef, { order: doc.data().order + 1 });
-        });
+            let taskData;
 
-        // Add the task to the new list (or update its position in the current list)
-        const taskRef = db.collection(`taskList/${newList || listId}/tasks`).doc(id);
-        batch.set(taskRef, {
-            id,
-            title,
-            description,
-            order, // New order position
-        });
+            if (newList && listId !== newList) {
+                const oldTaskRef = admin.firestore().collection(`taskList/${listId}/tasks`).doc(id);
+                await admin.firestore().collection('taskList').doc(listId).update({
+                    tasks: admin.firestore.FieldValue.arrayRemove(id),
+                });
+                const oldTaskDoc = await oldTaskRef.get();
+                if (!oldTaskDoc.exists) {
+                    return res.status(404).json({ error: 'Task not found' });
+                }
+                taskData = oldTaskDoc.data();
+                batch.delete(oldTaskRef);
+            } else {
+                const taskRef = admin.firestore().collection(`taskList/${listId}/tasks`).doc(id);
+                const taskDoc = await taskRef.get();
+                if (!taskDoc.exists) {
+                    return res.status(404).json({ error: 'Task not found' });
+                }
+                taskData = taskDoc.data();
+            }
 
-        // Commit the batch operation
-        await batch.commit();
+            const tasksToUpdateSnapshot = await admin.firestore().collection(`taskList/${newList || listId}/tasks`)
+                .where('order', '>=', order)
+                .orderBy('order', 'asc')
+                .get();
 
-        return res.status(200).json({ message: 'Task reordered successfully' });
+            tasksToUpdateSnapshot.forEach((doc) => {
+                const taskRef = admin.firestore().collection(`taskList/${newList || listId}/tasks`).doc(doc.id);
+                batch.update(taskRef, { order: doc.data().order + 1 });
+            });
 
-    } catch (error) {
-        console.error('Error reordering task:', error);
-        return res.status(500).json({ error: 'Something went wrong' });
-    }
-});
+            const taskRef = admin.firestore().collection(`taskList/${newList || listId}/tasks`).doc(id);
+            batch.set(taskRef, {
+                ...taskData,
+                order,
+                updatedAt: Timestamp.now(),
+            });
+
+            await batch.commit();
+
+            return res.status(200).json({ message: 'Task reordered successfully' });
+
+        } catch (error) {
+            console.error('Error reordering task:', error);
+            return res.status(500).json({ error: 'Something went wrong' });
+        }
+    });
 
 router.delete('/', authenticateToken, async (req, res) => {
     const { listId, id } = req.query;
 
     try {
         await admin.firestore().collection(`taskList/${listId}/tasks`).doc(id).delete();
-        const taskListSnapshot = await admin.firestore().collection('taskList/${listId}/tasks').get()
 
-        if (taskListSnapshot.docs.length === 0) {
-            await admin.firestore().collection('taskList').doc(listId).delete();
-        } else {
-            await admin.firestore().collection('taskList').doc(listId).update({
-                tasks: admin.firestore.FieldValue.arrayRemove(id),
-            });
-        }
+        await admin.firestore().collection('taskList').doc(listId).update({
+            tasks: admin.firestore.FieldValue.arrayRemove(id),
+        });
 
         return res.status(200).json({ message: 'Task deleted successfully' });
 
