@@ -60,17 +60,24 @@ router.post('/addTask',
 
 router.get('/', authenticateToken, async (req, res) => {
     try {
+        const token = req.headers.authorization.split(' ')[1];
+        const decodedToken = await admin.auth().verifyIdToken(token);
+        const uid = decodedToken.uid;
         const snapshot = await admin.firestore().collection('taskList').get();
         const tasks = [];
 
         for (const doc of snapshot.docs) {
-            const taskListSnapshot = await admin.firestore().collection(`taskList/${doc.id}/tasks`).get();
-            const taskList = taskListSnapshot.docs.map(taskDoc => ({
-                ...taskDoc.data(),
-                listId: doc.id
-            }));
+            if (doc.data().userId === uid) {
+                const taskList = await admin.firestore().collection(`taskList/${doc.id}/tasks`).get();
 
-            tasks.push(taskList);
+                taskList.forEach((task) => {
+                    tasks.push({
+                        id: task.id,
+                        listId: doc.id,
+                        ...task.data(),
+                    });
+                });
+            }
         }
 
         return res.status(200).json(tasks);
