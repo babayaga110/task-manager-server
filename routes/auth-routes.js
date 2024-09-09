@@ -5,6 +5,7 @@ const { Timestamp } = require("firebase-admin/firestore");
 const { body, validationResult } = require('express-validator');
 
 
+
 router.post('/register', [
     body('firstName').notEmpty().withMessage('First name is required'),
     body('lastName').notEmpty().withMessage('Last name is required'),
@@ -15,19 +16,53 @@ router.post('/register', [
     if (!errors.isEmpty()) {
         return res.status(400).json({ errors: errors.array() });
     }
-    const { firstName, lastName, email, password } = req.body
+
+    const { firstName, lastName, email, password } = req.body;
+
     try {
         const user = await admin.auth().createUser({
             email,
             password,
             displayName: `${firstName} ${lastName}`
-        })
-        await admin.firestore().collection('users').doc(user.uid).set({
+        });
+
+        const uid = user.uid;
+        const userDoc = admin.firestore().collection('users').doc(uid);
+
+        const batch = admin.firestore().batch();
+
+        batch.set(userDoc, {
             name: user.displayName,
             email,
-            id: user.uid,
+            id: uid,
             createdAt: Timestamp.now()
         });
+
+        const taskTitles = ["TODO", "IN PROGRESS", "DONE"];
+        taskTitles.forEach(title => {
+            const taskListDoc = admin.firestore().collection('taskList').doc();
+            const taskDoc = taskListDoc.collection('tasks').doc();
+
+            batch.set(taskListDoc, {
+                tasks: [taskDoc.id],
+                title: title,
+                createdAt: Timestamp.now(),
+                updatedAt: Timestamp.now(),
+                userId: uid,
+            });
+
+            batch.set(taskDoc, {
+                title,
+                description: '', // Assuming description is empty or you can set a default value
+                createdAt: Timestamp.now(),
+                updatedAt: Timestamp.now(),
+                order: 0,
+                userId: uid,
+                id: taskDoc.id,
+            });
+        });
+
+        await batch.commit();
 
         return res.status(200).json({
             message: "User created successfully",
@@ -82,13 +117,45 @@ router.post('/google-login', [
                 user: userRecord.data()
             });
         }
-        await admin.firestore().collection('users').doc(user?.uid).set({
+        const userDoc = admin.firestore().collection('users').doc(user.uid);
+
+        const batch = admin.firestore().batch();
+
+        batch.set(userDoc, {
             name: user.name,
             email: user.email,
             id: user.uid,
             avatar: user.picture,
             createdAt: Timestamp.now()
         });
+
+        const taskTitles = ["TODO", "IN PROGRESS", "DONE"];
+        taskTitles.forEach(title => {
+            const taskListDoc = admin.firestore().collection('taskList').doc();
+            const taskDoc = taskListDoc.collection('tasks').doc();
+
+            batch.set(taskListDoc, {
+                tasks: [taskDoc.id],
+                title: title,
+                createdAt: Timestamp.now(),
+                updatedAt: Timestamp.now(),
+                userId: user.uid,
+            });
+
+            batch.set(taskDoc, {
+                title:'',
+                description: '', // Assuming description is empty or you can set a default value
+                createdAt: Timestamp.now(),
+                updatedAt: Timestamp.now(),
+                order: 0,
+                userId: user.uid,
+                id: taskDoc.id,
+            });
+        });
+
+        await batch.commit();
+
+
         return res.status(200).json({
             message: "User logged in successfully",
             user: {

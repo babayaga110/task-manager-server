@@ -15,15 +15,19 @@ router.post('/addTask',
         if (!errors.isEmpty()) {
             return res.status(400).json({ errors: errors.array() });
         }
+
         const token = req.headers.authorization.split(' ')[1];
         const decodedToken = await admin.auth().verifyIdToken(token);
         const uid = decodedToken.uid;
 
-
-
         const { title = '', description = '' } = req.body;
 
         try {
+            const batch = admin.firestore().batch();
+
+            const taskListRef = admin.firestore().collection('taskList').doc();
+            const taskRef = taskListRef.collection('tasks').doc();
+
             const task = {
                 title,
                 description,
@@ -31,25 +35,21 @@ router.post('/addTask',
                 updatedAt: Timestamp.now(),
                 order: 0,
                 userId: uid,
+                id: taskRef.id,
             };
 
-            const docRef = await admin.firestore().collection('taskList').add({
-                tasks: [],
+            batch.set(taskListRef, {
+                tasks: [taskRef.id],
                 createdAt: Timestamp.now(),
                 updatedAt: Timestamp.now(),
                 userId: uid,
             });
 
-            const doc = await admin.firestore().collection(`taskList/${docRef.id}/tasks`).add(task);
-            await admin.firestore().collection(`taskList/${docRef.id}/tasks`).doc(doc.id).update({
-                id: doc.id,
-            });
+            batch.set(taskRef, task);
 
-            await admin.firestore().collection('taskList').doc(docRef.id).update({
-                tasks: admin.firestore.FieldValue.arrayUnion(doc.id),
-            });
+            await batch.commit();
 
-            return res.status(201).json({ message: 'Task added successfully', taskId: doc.id });
+            return res.status(201).json({ message: 'Task added successfully', taskId: taskRef.id });
 
         } catch (error) {
             console.error('Error adding task:', error);
@@ -57,7 +57,6 @@ router.post('/addTask',
         }
     }
 );
-
 router.get('/', authenticateToken, async (req, res) => {
     try {
         const token = req.headers.authorization.split(' ')[1];
@@ -67,17 +66,22 @@ router.get('/', authenticateToken, async (req, res) => {
         const tasks = [];
 
         for (const doc of snapshot.docs) {
-            if (doc.data().userId === uid) {
-                const taskList = await admin.firestore().collection(`taskList/${doc.id}/tasks`).get();
+            const taskListSnapshot = await admin.firestore().collection(`taskList/${doc.id}/tasks`).get();
+            const taskList = taskListSnapshot.docs
+                .filter(taskDoc => taskDoc.data().userId === uid) // Filter tasks by userId
+                .map(taskDoc => ({
+                    ...taskDoc.data(),
+                    listId: doc.id
+                }));
 
-                taskList.forEach((task) => {
-                    tasks.push({
-                        id: task.id,
-                        listId: doc.id,
-                        ...task.data(),
-                    });
+            if (taskList.length > 0) {
+                tasks.push({
+                    id: doc.id,
+                    title: doc.data().title,
+                    tasks: taskList,
                 });
             }
+
         }
 
         return res.status(200).json(tasks);
