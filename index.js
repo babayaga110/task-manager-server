@@ -5,7 +5,6 @@ const admin = require("firebase-admin");
 const dotenv = require('dotenv').config();
 
 // Database
-const serviceAccount = require("./task-manager-d4c28-firebase-adminsdk-l28iv-35e0f38968.json");
 admin.initializeApp({
     credential: admin.credential.cert({
         projectId: process.env.PROJECT_ID,
